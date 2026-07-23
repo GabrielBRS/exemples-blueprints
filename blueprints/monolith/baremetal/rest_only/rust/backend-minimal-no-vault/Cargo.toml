@@ -17,6 +17,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 uuid = { version = "1", features = ["serde"] }
+log = "0.4.33"
 
 [profile.release]
 opt-level = 3

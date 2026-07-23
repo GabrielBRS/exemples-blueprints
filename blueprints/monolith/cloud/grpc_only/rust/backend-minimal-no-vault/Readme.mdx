@@ -1,0 +1,177 @@
+# rust-api-rest-scaffold
+
+Esqueleto **agnóstico** de API REST (monolito) em Rust. Serve de ponto de
+partida para qualquer projeto novo: copie, renomeie e comece a codar o domínio,
+sem re-derivar boilerplate.
+
+**Stack:** Axum 0.8 · Tokio · SQLx (Postgres) · dotenv · tracing.
+**Arquitetura:** monolito, 100% REST, em camadas `handler → service → repository`.
+
+Tudo que é "de exemplo" está prefixado com `example` — o recurso `Example` é um
+CRUD completo pronto para você duplicar e adaptar (`example_handler`,
+`example_service`, `example_repository`, `example_router`, `example configuration`).
+
+---
+
+## 1. Criando o projeto pela linha de comando
+
+Este repositório já está montado, mas para referência — como esses projetos
+nascem, **tudo por linha de comando**:
+
+```bash
+# Binário (aplicação executável) — é este scaffold:
+cargo new --bin rust-api-rest-scaffold
+
+# Biblioteca (crate reutilizável, sem main):
+cargo new --lib minha-lib
+
+# Explicitando o tipo (equivalentes aos de cima):
+cargo new --bin meu-servico     # gera src/main.rs
+cargo new --lib meu-pacote      # gera src/lib.rs
+```
+
+- `--bin` → cria `src/main.rs` (tem `fn main`, vira executável).
+- `--lib` → cria `src/lib.rs` (biblioteca, sem `main`, para ser importada).
+
+---
+
+## 2. Rodando e compilando
+
+```bash
+cargo run             # compila (debug) e executa
+cargo run --release   # executa otimizado (mais lento p/ compilar, rápido p/ rodar)
+
+cargo build           # só compila (debug)  -> target/debug/
+cargo build --release # compila otimizado    -> target/release/
+
+cargo check           # checagem rápida de tipos, sem gerar binário
+cargo test            # roda os testes (inclui o teste de DI com repo em memória)
+cargo clippy          # lint
+cargo fmt             # formatação
+```
+
+---
+
+## 3. Pré-requisitos para subir
+
+1. **Toolchain Rust ≥ 1.80** (axum 0.8). Recomendado via `rustup`.
+2. **Postgres** acessível. Suba um rápido com Docker:
+
+```bash
+docker run --name pg-scaffold -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=scaffold -p 5432:5432 -d postgres:16
+```
+
+3. **Configuração**: copie o `.env`:
+
+```bash
+cp .env.example .env
+# ajuste DATABASE_URL / PORT se precisar
+```
+
+As **migrations** em `migrations/` rodam automaticamente no start (via
+`sqlx::migrate!`). Não precisa rodar nada à mão.
+
+4. Suba:
+
+```bash
+cargo run
+# -> servidor ouvindo em http://0.0.0.0:8080
+```
+
+---
+
+## 4. Testando as rotas (terminal ou Postman)
+
+Base: `http://localhost:8080`
+
+### Health check
+```bash
+curl http://localhost:8080/health
+# {"status":"ok"}
+```
+
+### Criar (POST)
+```bash
+curl -X POST http://localhost:8080/api/v1/examples \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"primeiro","description":"criado via curl"}'
+```
+
+### Listar (GET)
+```bash
+curl http://localhost:8080/api/v1/examples
+```
+
+### Buscar por id (GET)
+```bash
+curl http://localhost:8080/api/v1/examples/<UUID>
+```
+
+### Atualizar (PUT)
+```bash
+curl -X PUT http://localhost:8080/api/v1/examples/<UUID> \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"editado","description":null}'
+```
+
+### Remover (DELETE)
+```bash
+curl -X DELETE http://localhost:8080/api/v1/examples/<UUID>
+# 204 No Content
+```
+
+No **Postman**: mesma coisa — método + URL, e no POST/PUT use a aba
+_Body → raw → JSON_ com o mesmo corpo dos exemplos.
+
+---
+
+## 5. Layout do projeto
+
+```
+src/
+├── main.rs              # entrypoint: env, tracing, pool, migrations, DI, serve
+├── config.rs            # "example configuration": lê variáveis de ambiente
+├── error.rs             # AppError unificado -> resposta JSON (IntoResponse)
+├── state.rs             # AppState: container de dependências injetado
+├── router.rs            # "example router": rotas + middlewares globais
+├── handlers/            # "example handler": adapta HTTP <-> service
+│   ├── example.rs
+│   └── health.rs
+├── services/            # "example service": regra de negócio (+ teste de DI)
+│   └── example.rs
+├── repositories/        # "example repository": trait + impl Postgres (SQLx)
+│   └── example.rs
+├── models/              # entidades de domínio (FromRow)
+│   └── example.rs
+└── dto/                 # contratos de entrada/saída da API
+    └── example.rs
+migrations/              # SQL versionado, roda no boot
+```
+
+**Fluxo de uma requisição:** `router → handler → service → repository → Postgres`,
+e a resposta volta convertida em DTO. O `service` depende do **trait**
+`ExampleRepository` (não da struct concreta), então dá para trocar o Postgres por
+um mock nos testes — veja `#[cfg(test)]` em `src/services/example.rs`.
+
+---
+
+## 6. Como usar para um projeto novo
+
+1. Copie a pasta e renomeie o projeto (`name` no `Cargo.toml`).
+2. Duplique o quarteto `example` (handler/service/repository/model+dto) para o seu
+recurso real (ex.: `user`, `order`...).
+3. Registre as rotas novas em `router.rs`.
+4. Adicione a migration correspondente em `migrations/`.
+5. Apague o recurso `example` quando não precisar mais dele.
+
+---
+
+## 7. Notas de evolução
+
+- **SQLx runtime vs. compile-time:** o scaffold usa `query_as::<_, T>("...")` em
+runtime, então compila **sem banco no ar**. Para checagem de queries em tempo de
+compilação (`query!`/`query_as!`), rode `cargo sqlx prepare` e versione `.sqlx/`.
+- **Segredos:** aqui usamos `.env` (dotenv), não Vault. Trocar por Vault/secret
+manager é um passo futuro — a leitura já está isolada em `config.rs`.
+- **CORS:** está `permissive()` para desenvolvimento. Restrinja em produção.

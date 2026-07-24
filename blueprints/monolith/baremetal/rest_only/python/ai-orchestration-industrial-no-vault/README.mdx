@@ -1,0 +1,121 @@
+# ai-orchestrator-industrial-no-vault (Python)
+
+Orquestrador de **agentes de IA agnóstico**: a mesma filosofia dos backends —
+estrutura separada da regra de negócio — aplicada ao mundo dos agentes. Aqui, o
+insight central é que **o framework de orquestração (LangGraph, AutoGen, o
+próximo que surgir) é detalhe de implementação atrás de um seam**, exatamente
+como o Postgres ficava atrás do `ExampleRepository`.
+
+**Stack:** FastAPI · uvicorn (uvloop) · pydantic v2 · httpx ·
+LangGraph 1.x / AutoGen (agentchat) 0.7 **como extras opcionais**.
+
+---
+
+## Os dois seams
+
+```
+handler → service → [AgentOrchestrator]  ← o seam central (Protocol)
+                        ├── EchoOrchestrator       (dev/teste, sem LLM)
+                        ├── LangGraphOrchestrator  (grafo plan→execute→review)
+                        │       └── [LLMClient]    ← seam do provedor de modelo
+                        │             ├── OpenAICompatibleClient (vLLM/Ollama/OpenAI, httpx puro)
+                        │             └── FakeLLMClient          (teste, determinístico)
+                        └── AutoGenOrchestrator    (time planner+executor RoundRobin)
+                                └── model client do próprio AutoGen (Replay p/ teste)
+```
+
+1. **`AgentOrchestrator`** — todo adapter promete o mesmo: `run(task) →
+   OrchestrationRun` (steps + output, no vocabulário de domínio). Handlers,
+   service e DTOs **nunca** importam langgraph/autogen. Framework morreu ou
+   surgiu outro? Escreve-se um adapter novo; nada acima muda.
+2. **`LLMClient`** — o provedor de modelo também é seam. O client fala o dialeto
+   OpenAI-compatible via httpx puro (sem SDK): **on-premise first** — aponte pro
+   seu vLLM/Ollama e pronto.
+
+A agnosticidade vira **packaging**: o core não depende de framework nenhum; cada
+adapter é um extra (`pip install .[langgraph]`, `.[autogen]`, `.[all]`) com
+import lazy. Só se paga pelo que se usa.
+
+O composition root (`_build_orchestrator` em `main.py`) é o **único** lugar onde
+o nome em `ORCHESTRATOR` vira classe concreta — o registro de adapters.
+
+---
+
+## Rodar
+
+```bash
+uv sync                              # instala core + dev (inclui os 2 frameworks)
+cp .env.example .env                 # ORCHESTRATOR=echo por default
+
+uv run python -m app.main            # sobe em http://0.0.0.0:8080
+uv run pytest                        # 5 testes, ZERO LLM (ver abaixo)
+```
+
+Com LLM de verdade (ex.: Ollama local):
+
+```bash
+# .env: ORCHESTRATOR=langgraph | autogen
+#        LLM_BASE_URL=http://localhost:11434/v1   LLM_MODEL=llama3.1
+uv run python -m app.main
+```
+
+## Rotas
+
+```bash
+curl http://localhost:8080/health/live
+curl -X POST http://localhost:8080/api/v1/orchestrations/ \
+  -H 'Content-Type: application/json' -d '{"task":"planeje um estudo de Rust"}'
+# -> { id, status, steps:[{agent,output}...], output, ... }
+curl http://localhost:8080/api/v1/orchestrations/          # historico
+curl http://localhost:8080/api/v1/orchestrations/<UUID>    # um run
+```
+
+Docs interativas: `http://localhost:8080/docs`.
+
+---
+
+## Os testes provam o seam
+
+`tests/test_orchestrators.py` roda **os frameworks reais sem nenhum LLM**:
+
+- o grafo LangGraph inteiro executa com um `FakeLLMClient` (respostas gravadas);
+- o time AutoGen inteiro executa com o `ReplayChatCompletionClient` do
+  `autogen-ext`;
+- os **mesmos asserts** passam contra adapters diferentes — a prova concreta de
+  que o contrato é agnóstico;
+- o fluxo HTTP completo roda com o `EchoOrchestrator`.
+
+Zero rede, zero chave de API, sub-segundo.
+
+---
+
+## Layout
+
+```
+app/
+├── main.py                          # composition root + registro de adapters
+├── config.py                        # ORCHESTRATOR + LLM_* (SecretStr)
+├── errors.py                        # AppError -> JSON (502 p/ falha de orquestracao)
+├── handlers/orchestration_handler.py
+├── handlers/health_handler.py       # /health/live + /health/ready
+├── services/orchestration_service.py# regra de negocio + historico de runs
+├── orchestrators/
+│   ├── orchestrator.py              # o Protocol (o seam central)
+│   ├── echo_orchestrator.py         # gabarito minimo de adapter
+│   ├── langgraph_orchestrator.py    # StateGraph plan->execute->review
+│   └── autogen_orchestrator.py      # AssistantAgent x2 + RoundRobinGroupChat
+├── llm/llm_client.py                # Protocol + OpenAICompatible + Fake
+├── models/orchestration.py          # OrchestrationRun/Step/RunStatus (dominio)
+└── dto/orchestration_dto.py         # request/response pydantic
+```
+
+### Escrever um adapter novo (CrewAI, smolagents, o que vier)
+1. Crie `orchestrators/<nome>_orchestrator.py` com `name` e `async run(task)`,
+   traduzindo o resultado do framework para `OrchestrationRun`/`Step`.
+2. Registre uma linha no `match` de `_build_orchestrator`.
+3. Adicione o extra no `pyproject.toml`. Pronto — handlers/service intocados.
+
+### Evoluções conhecidas (fora do escopo deste esqueleto)
+Streaming SSE dos steps · persistência dos runs em Postgres (copiar o padrão
+repository dos irmãos backend) · execução assíncrona com fila · variant `-vault`
+(mesmo modelo env-aware dos backends, com `LLM_API_KEY` vindo do Vault).

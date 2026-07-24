@@ -1,0 +1,33 @@
+[project]
+name = "ai-orchestrator-industrial-no-vault"
+version = "0.1.0"
+description = "Orquestrador de agentes de IA agnostico: o framework (LangGraph/AutoGen/...) e detalhe de implementacao atras de um seam."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.139",
+    "uvicorn[standard]>=0.35",
+    "pydantic>=2.13",
+    "pydantic-settings>=2.7",
+    "httpx>=0.28",              # client OpenAI-compatible (vLLM/Ollama/OpenAI) sem SDK
+]
+
+# A agnosticidade em forma de packaging: o core NAO depende de framework nenhum.
+# Cada adapter e um extra opcional; instale so o que for usar.
+[project.optional-dependencies]
+langgraph = ["langgraph>=1.0"]
+autogen = ["autogen-agentchat>=0.7", "autogen-ext>=0.7"]
+all = ["langgraph>=1.0", "autogen-agentchat>=0.7", "autogen-ext>=0.7"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.25",
+    "httpx>=0.28",
+    "langgraph>=1.0",
+    "autogen-agentchat>=0.7",
+    "autogen-ext>=0.7",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

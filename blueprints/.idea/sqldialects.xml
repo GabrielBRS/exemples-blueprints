@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="SqlDialectMappings">
+    <file url="file://$PROJECT_DIR$/monolith/baremetal/rest_only/rust/backend-industrial-vault/migrations/0001_create_examples.sql" dialect="GenericSQL" />
     <file url="file://$PROJECT_DIR$/monolith/baremetal/rest_only/rust/backend-minimal-no-vault/migrations/0001_init.sql" dialect="GenericSQL" />
   </component>
 </project>

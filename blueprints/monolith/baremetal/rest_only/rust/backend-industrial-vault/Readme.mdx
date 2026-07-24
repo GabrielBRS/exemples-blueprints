@@ -1,0 +1,92 @@
+# backend-industrial-vault
+
+Monolito REST **industrial** em Rust, com gestao de segredos **env-aware**.
+Camadas `handler → service → repository` (igual ao `backend-industrial-no-vault`),
+mais um loader de config que troca a fonte dos segredos conforme o ambiente.
+
+**Slot no blueprints:** `monolith/baremetal/rest_only/rust/backend-industrial-vault`
+**Stack:** Axum 0.8 · Tokio · SQLx (Postgres) · dotenv · **Vault** (`vaultrs` 0.8 / `vaultrs-login` 0.2, KV v2 + AppRole).
+
+---
+
+## O modelo env-aware
+
+O *ambiente* (`APP_ENV`) decide de onde vem cada **segredo**:
+
+| APP_ENV | fonte dos segredos | comportamento |
+|---|---|---|
+| `development` (default) | ambiente / `.env` | zero atrito pro dev |
+| `staging` / `production` | **Vault** (KV v2, auth AppRole) | **fail-closed** |
+
+Dois princípios que evitam footgun:
+
+1. **Só segredo troca de fonte.** `HOST`, `PORT`, tamanho do pool, log level vêm
+**sempre** do ambiente (quem seta é o orquestrador). O Vault guarda só o que é
+segredo de fato (DATABASE_URL, chaves).
+2. **Fail-closed em staging/prod.** Se o Vault estiver inacessível ou faltar um
+segredo, o boot **aborta** — nunca cai silenciosamente pro `.env`. O fallback
+pro ambiente é cortesia **exclusiva de development**.
+
+`APP_ENV` ausente → assume `development` (protege a DX). Produção/homologação
+**precisam** setar explícito; o serviço loga no startup em que modo subiu.
+
+O seam é o mesmo padrão de DI do resto do projeto — um trait `SecretProvider` com
+duas implementações (`EnvSecrets`, `VaultSecrets`), escolhidas no boot em
+`config.rs`. Handlers e services não sabem de onde o segredo veio.
+
+---
+
+## Rodar em desenvolvimento
+
+```bash
+cp .env.example .env        # APP_ENV=development ja e o default
+docker run --name pg-scaffold -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=scaffold -p 5432:5432 -d postgres:16
+cargo run                   # migrations rodam no boot -> http://0.0.0.0:8080
+```
+
+Em dev, `EnvSecrets::get` é só `std::env::var` — o `.env` funciona igual ao
+variant `-no-vault`, sem atrito.
+
+## Rodar em staging/produção
+
+Setar `APP_ENV=staging|production` e o bloco `VAULT_*`. O AppRole precisa de
+`VAULT_ROLE_ID`/`VAULT_SECRET_ID`, injetados pelo orquestrador (Secret do k3s ou
+unidade systemd), nunca no repositório. Os segredos ficam num path KV v2
+(`VAULT_KV_MOUNT` + `VAULT_SECRET_PATH`), lidos uma vez no boot.
+
+### Notas de segredos
+- **OpenBao** (fork MPL da Vault, API-compatível) funciona com o mesmo `vaultrs` —
+opção 100% OSS self-hostável, alinhada ao on-premise-first.
+- **Kubernetes (k3s):** o `vaultrs-login` 0.2 traz só `approle`/`userpass`, sem
+login k8s nativo. Caminhos: (a) AppRole com `role_id`/`secret_id` via Secret do
+cluster — o que este scaffold já faz; (b) login k8s nativo por POST manual em
+`auth/kubernetes/login` com o JWT da service account; (c) Vault Agent Injector /
+Vault Secrets Operator injetando os segredos como env — o que cai no caminho de
+`EnvSecrets` sem código extra.
+- **Escopo:** segredos lidos no boot. Renovação de lease / segredo dinâmico é
+evolução conhecida, não incluída aqui.
+
+---
+
+## Rotas
+
+Idênticas ao `-no-vault`: `/health`, e o CRUD em `/api/v1/examples`
+(`GET` lista, `POST` cria, `GET|PUT|DELETE /api/v1/examples/{id}`). Veja o teste de
+DI com repositório em memória em `src/services/example.rs`.
+
+```bash
+curl http://localhost:8080/health
+curl -X POST http://localhost:8080/api/v1/examples \
+  -H 'Content-Type: application/json' -d '{"name":"primeiro"}'
+curl http://localhost:8080/api/v1/examples
+```
+
+---
+
+## Layout
+
+Igual ao `backend-industrial-no-vault`, com a diferença concentrada em `config.rs`
+(`AppEnv`, `SecretProvider`, `EnvSecrets`, `VaultSecrets`, `Config::load()`).
+O `main.rs` chama `Config::load().await` no boot; o resto (router, handlers,
+services, repositories, error, migrations) é o mesmo.

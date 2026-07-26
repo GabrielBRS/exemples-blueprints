@@ -1,0 +1,163 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rag
+---
+# ─────────────────────────── vLLM ───────────────────────────
+# Um pod, uma GPU. `replicas` só faz sentido com mais placas —
+# duas réplicas na mesma GPU disputam VRAM e derrubam as duas.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: rag
+spec:
+  replicas: 1
+  strategy: { type: Recreate }        # rolling em GPU única = OOM garantido
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata:
+      labels: { app: vllm }
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector: { sgt.io/gpu: "rtx5070ti" }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model=/models/Qwen3-32B-AWQ
+            - --served-model-name=Qwen/Qwen3-32B-AWQ
+            - --quantization=awq_marlin
+            - --max-model-len=32768
+            - --gpu-memory-utilization=0.88
+            - --enable-prefix-caching       # o system prompt do RAG é fixo:
+                                            # o prefill dele passa a ser cache hit
+            - --enable-chunked-prefill      # prefill longo não bloqueia o decode
+                                            # dos outros requests (p99 do stream)
+            - --structured-outputs-config.backend=xgrammar
+            - --max-num-seqs=64
+          ports: [{ containerPort: 8000 }]
+          resources:
+            limits: { nvidia.com/gpu: 1 }
+          volumeMounts:
+            - { name: models, mountPath: /models }
+            - { name: shm, mountPath: /dev/shm }
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 120       # carga de pesos de 32B não é rápida
+            periodSeconds: 10
+      volumes:
+        - name: models
+          persistentVolumeClaim: { claimName: models-pvc }
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 8Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: rag }
+spec:
+  selector: { app: vllm }
+  ports: [{ port: 8000, targetPort: 8000 }]
+---
+# ────────────────────────── Triton ──────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton
+  namespace: rag
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: triton } }
+  template:
+    metadata:
+      labels: { app: triton }
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector: { sgt.io/gpu: "rtx5070ti" }
+      containers:
+        - name: triton
+          image: nvcr.io/nvidia/tritonserver:24.12-py3
+          args:
+            - tritonserver
+            - --model-repository=/models/triton
+            - --model-control-mode=explicit
+            - --load-model=bge_m3_encoder
+            - --load-model=bge_reranker_v2_m3
+            # os dois modelos são pequenos: cabem junto do LLM na mesma placa
+            - --cuda-memory-pool-byte-size=0:1073741824
+          ports:
+            - { containerPort: 8000, name: http }
+            - { containerPort: 8001, name: grpc }
+            - { containerPort: 8002, name: metrics }
+          resources:
+            limits: { nvidia.com/gpu: 1 }
+          volumeMounts: [{ name: models, mountPath: /models }]
+          readinessProbe:
+            httpGet: { path: /v2/health/ready, port: 8000 }
+            initialDelaySeconds: 20
+      volumes:
+        - name: models
+          persistentVolumeClaim: { claimName: models-pvc }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: triton, namespace: rag }
+spec:
+  selector: { app: triton }
+  ports:
+    - { name: http, port: 8000 }
+    - { name: grpc, port: 8001 }
+    - { name: metrics, port: 8002 }
+---
+# ───────────────────── rag-graph (control plane) ─────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-graph
+  namespace: rag
+spec:
+  replicas: 3                            # stateless: o estado está no Postgres
+  selector: { matchLabels: { app: rag-graph } }
+  template:
+    metadata:
+      labels: { app: rag-graph }
+    spec:
+      # Precisa ser maior que a geração mais longa que você aceita perder.
+      # O RunControl drena o superstep corrente e grava checkpoint dentro
+      # dessa janela; o que não couber é retomado por outro pod.
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: api
+          image: registry.interno/sgt/rag-graph:0.1.0
+          command: ["granian"]
+          args:
+            - --interface=asgi
+            - --host=0.0.0.0
+            - --port=8080
+            - --workers=2
+            - --loop=uvloop
+            - rag_graph.server:app
+          env:
+            - { name: RAG_APP_ENV, value: production }
+            - { name: RAG_LLM_BASE_URL, value: "http://vllm.rag.svc:8000/v1" }
+            - { name: RAG_TRITON_URL, value: "triton.rag.svc:8001" }
+            - name: RAG_PG_DSN
+              valueFrom: { secretKeyRef: { name: rag-secrets, key: pg-dsn } }
+          ports: [{ containerPort: 8080 }]
+          resources:
+            requests: { cpu: "500m", memory: 512Mi }
+            limits: { cpu: "2", memory: 2Gi }
+          livenessProbe:
+            httpGet: { path: /health/live, port: 8080 }   # não toca o banco
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /health/ready, port: 8080 }  # toca o banco
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata: { name: rag-graph, namespace: rag }
+spec:
+  selector: { app: rag-graph }
+  ports: [{ port: 80, targetPort: 8080 }]
